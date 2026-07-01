@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Virtual env
+.venv/
+
+# Data (large, regenerable from BRFSS source)
+data/
+
+# OS
+.DS_Store
