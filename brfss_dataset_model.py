@@ -12,9 +12,12 @@ Targets soportados:
 
 Pipeline por fold:
   1. Imputacion (mediana para numericas/ordinales, moda para categoricas).
-  2. SMOTENC sobre el set de entrenamiento (sobre-muestrea la clase minoritaria).
+  2. Resampleo o reponderado segun `--balancing`: class_weight en cada
+     modelo (`class_weight`, default), SMOTENC sintetico (`smote`),
+     submuestreo aleatorio (`undersampling-random`) o NearMiss-1
+     (`undersampling-nearmiss`).
   3. Encoding (StandardScaler para numericas/ordinales, OneHotEncoder para categoricas).
-  4. Modelo (RandomForest, LinearSVC con calibrado, LogisticRegression).
+  4. Modelo (RandomForest, LinearSVC con calibrado, LogisticRegression, XGBoost, LightGBM).
 
 Evaluacion: stratified k-fold cross-validation. Reporta accuracy, precision,
 recall, F1, specificity, ROC-AUC, PR-AUC, Brier. Escribe un CSV por fold y
@@ -26,8 +29,10 @@ Uso directo:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -44,6 +49,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -59,6 +66,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.svm import LinearSVC
 
 from imblearn.over_sampling import SMOTENC
+from imblearn.under_sampling import NearMiss, RandomUnderSampler
 
 
 SEED = 42
@@ -183,12 +191,84 @@ FEATURE_SETS: dict[str, dict] = {
             # Condiciones cronicas
             "CHCCOPD3", "CVDINFR4", "CVDCRHD4", "CVDSTRK3",
             "ASTHMA3", "HAVARTH4", "DIABETE4",
-            # Raza/etnia
-            "_RACE",
         ],
+        "mean_encoded": [],
         "use_ace": True,
     },
 }
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    """Configuracion inmutable de una corrida.
+
+    `spec` ya incluye el efecto de los flags runtime (ej. `--include-race`
+    agrega `_RACE` a `mean_encoded`). `columns_needed` y `feature_cols` se
+    derivan una sola vez en `resolve_config` y se reutilizan en I/O y en el
+    loop de CV. `balancing` es el valor codificado de `--balancing`
+    (ej. `undersampling-nearmiss`).
+    """
+    target_name: str
+    feature_set_name: str
+    target_spec: dict
+    spec: dict
+    xpt_path: Path
+    out_dir: Path
+    cv: int
+    seed: int
+    subsample: int | None
+    columns_needed: tuple[str, ...]
+    feature_cols: tuple[str, ...]
+    balancing: str
+
+
+def resolve_config(args: argparse.Namespace) -> RunConfig:
+    """Resuelve la configuracion completa de una corrida a partir de argparse.
+
+    Unico lugar que conoce el borde entre spec (definicion) y runtime config
+    (flags como `--include-race`). Calcula `columns_needed` y `feature_cols`
+    una sola vez, deduplicando.
+    """
+    target_spec = TARGETS[args.target]
+    spec = FEATURE_SETS[args.feature_set]
+    if args.include_race:
+        spec = {
+            **spec,
+            "mean_encoded": list(spec.get("mean_encoded", [])) + ["_RACE"],
+        }
+    use_ace = spec["use_ace"]
+
+    columns_needed = (
+        spec["numeric"]
+        + spec.get("ordinal", [])
+        + spec["categorical"]
+        + spec.get("mean_encoded", [])
+    )
+    if use_ace:
+        columns_needed = list(columns_needed) + list(ACE_VARIABLES)
+    columns_needed = tuple(dict.fromkeys(columns_needed))
+
+    feature_cols = (
+        spec["numeric"]
+        + spec.get("ordinal", [])
+        + spec["categorical"]
+        + spec.get("mean_encoded", [])
+    )
+
+    return RunConfig(
+        target_name=args.target,
+        feature_set_name=args.feature_set,
+        target_spec=target_spec,
+        spec=spec,
+        xpt_path=args.xpt,
+        out_dir=args.out,
+        cv=args.cv,
+        seed=args.seed,
+        subsample=args.subsample,
+        columns_needed=columns_needed,
+        feature_cols=tuple(feature_cols),
+        balancing=args.balancing,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -214,7 +294,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--feature-set",
         choices=list(FEATURE_SETS),
-        default="core+ses+aces",
+        default="recommended",
         help="Conjunto de predictores a usar.",
     )
     p.add_argument("--cv", type=int, default=5,
@@ -222,10 +302,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=SEED,
                    help="Semilla aleatoria.")
     p.add_argument(
+        "--include-race",
+        action="store_true",
+        help="Incluye _RACE como feature mean-encoded (calculado por fold). Sin este flag, _RACE no se incluye en el dataset.",
+    )
+    p.add_argument(
         "--subsample",
         type=int,
         default=None,
         help="Tamano de subsample estratificado para iteracion rapida. Por defecto: dataset completo.",
+    )
+    p.add_argument(
+        "--balancing",
+        choices=[
+            "class_weight",
+            "smote",
+            "undersampling-random",
+            "undersampling-nearmiss",
+        ],
+        default="class_weight",
+        help="Estrategia de balanceo: 'class_weight' (default, repondera "
+             "losses sin resamplear), 'smote' (SMOTENC sintetico), "
+             "'undersampling-random' (submuestreo aleatorio), "
+             "'undersampling-nearmiss' (NearMiss-1, submuestreo por distancia).",
     )
     return p.parse_args(argv)
 
@@ -314,11 +413,44 @@ def add_ace_score(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def smoothed_mean_encode(
+    train_series: pd.Series,
+    y_train: pd.Series,
+    test_series: pd.Series,
+    smoothing: float = 10.0,
+) -> tuple[pd.Series, pd.Series]:
+    """Mean encoding suavizado por categoria, ajustado solo sobre datos de entrenamiento.
+
+    enc(c) = (n_c * mean_c + alpha * global_mean) / (n_c + alpha)
+
+    Cada categoria se reemplaza por la media del target en entrenamiento,
+    suavizada hacia la media global con peso alpha. Reduce K categorias
+    nominales a 1 columna continua sin fuga de informacion (fit por fold).
+
+    Args:
+        train_series: valores categoricos de las filas de entrenamiento.
+        y_train: target binario para entrenamiento.
+        test_series: valores categoricos de las filas de test.
+        smoothing: peso del prior (alpha). Default 10.
+
+    Returns:
+        Tupla (train_encoded, test_encoded), Series float.
+    """
+    global_mean = y_train.mean()
+    grouped = pd.DataFrame({"c": train_series, "y": y_train}).groupby("c")["y"]
+    means = grouped.mean()
+    counts = grouped.count()
+    smoothed = (means * counts + global_mean * smoothing) / (counts + smoothing)
+    train_enc = train_series.map(smoothed).fillna(global_mean).astype(float)
+    test_enc = test_series.map(smoothed).fillna(global_mean).astype(float)
+    return train_enc, test_enc
+
+
 def make_imputer(numeric: list[str], categorical: list[str]) -> ColumnTransformer:
     """Crea un ColumnTransformer que imputa numericas con mediana y categoricas con moda.
 
     Args:
-        numeric: nombres de columnas numericas/ordinales.
+        numeric: nombres de columnas numericas, ordinales, y mean-encoded.
         categorical: nombres de columnas categoricas nominales.
 
     Returns:
@@ -360,17 +492,53 @@ def make_encoder(n_num: int, n_cat: int) -> ColumnTransformer:
     )
 
 
-def build_models(seed: int) -> dict[str, BaseEstimator]:
+def make_resampler(
+    balancing: str, n_num: int, n_cat: int, seed: int
+) -> SMOTENC | RandomUnderSampler | NearMiss | None:
+    """Factory para resamplers segun el modo de balanceo.
+
+    Args:
+        balancing: valor codificado de `--balancing`
+            (`smote` | `class_weight` | `undersampling-random` |
+            `undersampling-nearmiss`).
+        n_num: cantidad de columnas numericas/ordinales/mean-encoded.
+        n_cat: cantidad de columnas categoricas nominales.
+        seed: semilla aleatoria (ignorada por NearMiss, que es determinista).
+
+    Returns:
+        Instancia de resampler, o None para `class_weight` (no resamplea).
+    """
+    if balancing == "smote":
+        return SMOTENC(
+            categorical_features=list(range(n_num, n_num + n_cat)),
+            random_state=seed,
+        )
+    if balancing == "class_weight":
+        return None
+    if balancing == "undersampling-random":
+        return RandomUnderSampler(random_state=seed)
+    if balancing == "undersampling-nearmiss":
+        return NearMiss(version=1)
+    raise ValueError(f"Unknown balancing method: {balancing}")
+
+
+def build_models(
+    seed: int, class_weight: str | dict | None = None
+) -> dict[str, BaseEstimator]:
     """Construye el dict de modelos a evaluar.
 
-    Tres modelos:
+    Cinco modelos:
       - RandomForest (sin calibrar, probs razonablemente calibradas para ROC-AUC).
       - LinearSVC envuelto en CalibratedClassifierCV (cv=3, sigmoid) para
         obtener predict_proba y poder calcular Brier/ROC-AUC.
       - LogisticRegression (nativamente probabilistico, ya calibrado).
+      - XGBoost y LightGBM (gradient boosting; XGBoost acepta class_weight
+        nativamente y lo mapea a scale_pos_weight internamente).
 
     Args:
         seed: semilla para todos los estimadores.
+        class_weight: None | 'balanced' | dict mapeando clase -> peso.
+            Se pasa a todos los modelos que lo soportan (incluido XGBoost).
 
     Returns:
         Dict {nombre_modelo: estimador sin fit}.
@@ -381,9 +549,13 @@ def build_models(seed: int) -> dict[str, BaseEstimator]:
             max_depth=12,
             n_jobs=-1,
             random_state=seed,
+            class_weight=class_weight,
         ),
         "LinearSVC": CalibratedClassifierCV(
-            LinearSVC(dual="auto", max_iter=2000, random_state=seed),
+            LinearSVC(
+                dual="auto", max_iter=2000, random_state=seed,
+                class_weight=class_weight,
+            ),
             cv=3,
             method="sigmoid",
         ),
@@ -391,15 +563,39 @@ def build_models(seed: int) -> dict[str, BaseEstimator]:
             solver="newton-cholesky",
             max_iter=2000,
             random_state=seed,
+            class_weight=class_weight,
+        ),
+        "XGBoost": XGBClassifier(
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.1,
+            n_jobs=-1,
+            random_state=seed,
+            eval_metric="logloss",
+            verbosity=0,
+            class_weight=class_weight,
+        ),
+        "LightGBM": LGBMClassifier(
+            n_estimators=300,
+            learning_rate=0.1,
+            n_jobs=-1,
+            random_state=seed,
+            verbose=-1,
+            class_weight=class_weight,
         ),
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    defaults: list[str] | None = None,
+    user_argv: list[str] | None = None,
+) -> int:
     """Punto de entrada. Carga datos, hace CV, escribe resultados y figuras.
 
     Args:
-        argv: argumentos de linea de comandos (None usa sys.argv).
+        defaults: argumentos de linea de comandos aplicados como defaults
+            (los wrappers los usan para fijar `--target` y `--feature-set`).
+        user_argv: argumentos del usuario (None usa sys.argv[1:]).
 
     Returns:
         Codigo de salida (0 = exito).
@@ -407,26 +603,21 @@ def main(argv: list[str] | None = None) -> int:
     warnings.filterwarnings("ignore", category=FutureWarning)
     warnings.filterwarnings("ignore", category=UserWarning)
 
+    argv = (defaults or []) + (user_argv if user_argv is not None else sys.argv[1:])
     args = parse_args(argv)
-    np.random.seed(args.seed)
-
-    target_spec = TARGETS[args.target]
-    spec = FEATURE_SETS[args.feature_set]
+    config = resolve_config(args)
+    np.random.seed(config.seed)
+    spec = config.spec
     use_ace = spec["use_ace"]
 
-    columns_needed = (
-        spec["numeric"] + spec.get("ordinal", []) + spec["categorical"]
-    )
-    if use_ace:
-        columns_needed += ACE_VARIABLES
-    columns_needed = list(dict.fromkeys(columns_needed))
-
     print(
-        f"[load] reading {args.xpt}  usecols={len(columns_needed)+1}  "
-        f"target={args.target} ({target_spec['description']})"
+        f"[load] reading {config.xpt_path}  usecols={len(config.columns_needed)+1}  "
+        f"target={config.target_name} ({config.target_spec['description']})"
     )
     t0 = time.time()
-    df = load_and_clean(args.xpt, columns_needed, args.target)
+    df = load_and_clean(
+        config.xpt_path, list(config.columns_needed), config.target_name
+    )
     if use_ace:
         df = add_ace_score(df)
     print(
@@ -434,42 +625,43 @@ def main(argv: list[str] | None = None) -> int:
         f"({time.time() - t0:.1f}s)"
     )
 
-    if args.subsample and args.subsample < len(df):
+    if config.subsample and config.subsample < len(df):
         df, _ = train_test_split(
             df,
-            train_size=args.subsample,
+            train_size=config.subsample,
             stratify=df["target"],
-            random_state=args.seed,
+            random_state=config.seed,
         )
         print(f"[sub] subsampled to {len(df):,} rows")
 
-    # Las variables ordinales se tratan como numericas (mantienen el orden)
-    # pero pasan por el mismo flujo: impute (mediana) + StandardScaler.
-    feature_cols = (
-        spec["numeric"] + spec.get("ordinal", []) + spec["categorical"]
-    )
-    X = df[feature_cols]
+    # Las variables ordinales y mean-encoded se tratan como numericas
+    # (mantienen orden / son continuas tras encoding). Las categoricas nominales
+    # se one-hot-encodean.
+    X = df[list(config.feature_cols)]
     y = df["target"]
 
     skf = StratifiedKFold(
-        n_splits=args.cv, shuffle=True, random_state=args.seed
+        n_splits=config.cv, shuffle=True, random_state=config.seed
     )
-    n_num = len(spec["numeric"]) + len(spec.get("ordinal", []))
+    n_num = (
+        len(spec["numeric"])
+        + len(spec.get("ordinal", []))
+        + len(spec.get("mean_encoded", []))
+    )
     n_cat = len(spec["categorical"])
-    smote = SMOTENC(
-        categorical_features=list(range(n_num, n_num + n_cat)),
-        random_state=args.seed,
+    resampler = make_resampler(config.balancing, n_num, n_cat, config.seed)
+    class_weight_arg = (
+        "balanced" if config.balancing == "class_weight" else None
     )
-
-    models = build_models(args.seed)
+    models = build_models(config.seed, class_weight=class_weight_arg)
     rows: list[dict] = []
     cm_acc: dict[str, np.ndarray] = {
         n: np.zeros((2, 2), dtype=int) for n in models
     }
 
     print(
-        f"[run] target={args.target}  feature_set={args.feature_set}  "
-        f"cv={args.cv}  n_features={len(feature_cols)}  n={len(df):,}"
+        f"[run] target={config.target_name}  feature_set={config.feature_set_name}  "
+        f"cv={config.cv}  n_features={len(config.feature_cols)}  n={len(df):,}"
     )
     t_total = time.time()
     for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y), start=1):
@@ -478,20 +670,37 @@ def main(argv: list[str] | None = None) -> int:
 
         t_fold = time.time()
 
+        # Mean encoding para high-cardinality cats (ajustado solo sobre train).
+        # Se aplica ANTES del imputer; las columnas quedan como continuas.
+        for col in spec.get("mean_encoded", []):
+            train_enc, test_enc = smoothed_mean_encode(
+                X_tr[col], y_tr, X_te[col]
+            )
+            X_tr = X_tr.copy()
+            X_te = X_te.copy()
+            X_tr[col] = train_enc
+            X_te[col] = test_enc
+
         imputer = clone(make_imputer(
-            spec["numeric"] + spec.get("ordinal", []),
+            spec["numeric"]
+            + spec.get("ordinal", [])
+            + spec.get("mean_encoded", []),
             spec["categorical"],
         ))
         X_tr_imp = imputer.fit_transform(X_tr)
         X_te_imp = imputer.transform(X_te)
 
-        t_sm = time.time()
-        X_tr_res, y_tr_res = clone(smote).fit_resample(X_tr_imp, y_tr)
-        smote_secs = time.time() - t_sm
-        print(
-            f"  [fold {fold_idx}/{args.cv}] SMOTENC: {smote_secs:.1f}s "
-            f"({X_tr_imp.shape[0]:,} -> {X_tr_res.shape[0]:,})"
-        )
+        t_resample = time.time()
+        if resampler is not None:
+            X_tr_res, y_tr_res = clone(resampler).fit_resample(X_tr_imp, y_tr)
+            resample_secs = time.time() - t_resample
+            print(
+                f"  [fold {fold_idx}/{config.cv}] {config.balancing}: "
+                f"{resample_secs:.1f}s "
+                f"({X_tr_imp.shape[0]:,} -> {X_tr_res.shape[0]:,})"
+            )
+        else:
+            X_tr_res, y_tr_res = X_tr_imp, y_tr
 
         encoder = clone(make_encoder(n_num, n_cat))
         X_tr_enc = encoder.fit_transform(X_tr_res)
@@ -520,12 +729,13 @@ def main(argv: list[str] | None = None) -> int:
             for k, v in metrics.items():
                 rows.append(
                     {
-                        "target": args.target,
+                        "target": config.target_name,
                         "model": name,
-                        "feature_set": args.feature_set,
+                        "feature_set": config.feature_set_name,
                         "fold": fold_idx,
                         "metric": k,
                         "value": v,
+                        "balancing": config.balancing,
                     }
                 )
             print(
@@ -535,14 +745,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"brier={metrics['brier']:.3f}"
             )
         print(
-            f"  [fold {fold_idx}/{args.cv}] fold total: "
+            f"  [fold {fold_idx}/{config.cv}] fold total: "
             f"{time.time() - t_fold:.1f}s"
         )
 
     out_df = pd.DataFrame(rows)
-    args.out.mkdir(parents=True, exist_ok=True)
-    fname_prefix = f"{args.target}_{args.feature_set}"
-    folds_path = args.out / f"folds_{fname_prefix}.csv"
+    config.out_dir.mkdir(parents=True, exist_ok=True)
+    fname_prefix = (
+        f"{config.target_name}_{config.feature_set_name}_{config.balancing}"
+    )
+    folds_path = config.out_dir / f"folds_{fname_prefix}.csv"
     out_df.to_csv(folds_path, index=False)
 
     summary = (
@@ -550,13 +762,13 @@ def main(argv: list[str] | None = None) -> int:
         .agg(["mean", "std"])
         .reset_index()
     )
-    summary.to_csv(args.out / f"summary_{fname_prefix}.csv", index=False)
+    summary.to_csv(config.out_dir / f"summary_{fname_prefix}.csv", index=False)
 
     pivot = summary.pivot(index="metric", columns="model", values="mean")
     pivot_std = summary.pivot(index="metric", columns="model", values="std")
     print(
-        f"\n=== Summary (target={args.target}, set={args.feature_set}, "
-        f"{args.cv}-fold) ==="
+        f"\n=== Summary (target={config.target_name}, set={config.feature_set_name}, "
+        f"{config.cv}-fold) ==="
     )
     print(pivot.round(3).to_string())
     print("\n(std)")
@@ -583,19 +795,19 @@ def main(argv: list[str] | None = None) -> int:
                     color="white" if cm[i, j] > cm.max() / 2 else "black",
                 )
         ax.set_title(
-            f"{name} — {args.target} / {args.feature_set} ({args.cv}-fold CM)"
+            f"{name} — {config.target_name} / {config.feature_set_name} ({config.cv}-fold CM)"
         )
         fig.colorbar(im, ax=ax)
         fig.tight_layout()
         fig.savefig(
-            args.out / f"cm_{name}_{fname_prefix}.png", dpi=110
+            config.out_dir / f"cm_{name}_{fname_prefix}.png", dpi=110
         )
         plt.close(fig)
 
     print(f"\nWrote:")
     print(f"  {folds_path}")
-    print(f"  {args.out / f'summary_{args.feature_set}.csv'}")
-    print(f"  {args.out}/cm_*.png")
+    print(f"  {config.out_dir / f'summary_{config.feature_set_name}.csv'}")
+    print(f"  {config.out_dir}/cm_*.png")
     return 0
 
 

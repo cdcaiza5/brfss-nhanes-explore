@@ -41,7 +41,31 @@ soporte emocional (`EMTSUPRT`) y raza/etnia (`_RACE`).
 
 Las **ordinales** (`_AGEG5YR`, `EDUCA`, `GENHLTH`, `LSATISFY`, `SDLONELY`,
 `EMTSUPRT`) se tratan como numericas (preservan el orden). Las nominales
-(`MARITAL`, `EMPLOY1`, `_RACE`) se one-hot-encodian.
+(`MARITAL`, `EMPLOY1`) se one-hot-encodian. `_RACE` se trata aparte: ver
+la seccion siguiente.
+
+### Raza/etnia (`--include-race`)
+
+`_RACE` no esta en el set `recommended` por default. Es un flag opt-in
+porque es la unica variable con scope US-specifico y su inclusion debe
+ser explicita.
+
+- **Sin el flag**: `_RACE` no aparece en el dataset, ni en X ni en el
+  modelo. Los conteos de features son los de la tabla de arriba.
+- **Con el flag**: `_RACE` se agrega como mean-encoding por fold
+  (ajustado solo sobre el train de cada fold, sin fuga). Reemplaza 7
+  dummies OHE por 1 columna continua.
+
+Lift medido (ver `reports/benchmark_2x2x2.md`):
+
+| Target | LightGBM ROC-AUC | Δ |
+|---|---:|---:|
+| `_MENT14D` | 0.7958 → 0.7986 | **+0.0028** |
+| `ADDEPEV3` | 0.7780 → 0.7890 | **+0.0110** |
+
+El lift es uniforme entre feature sets: `_RACE` aporta senal ortogonal
+a las features existentes, no redundante. En modelos lineales el efecto
+es despreciable (mean-encoding no es monotono).
 
 ## Limpieza
 
@@ -72,16 +96,21 @@ y se imputa con la mediana.
 
 ## Modelos
 
-Tres estimadores, mismos hiperparametros en todas las corridas:
+Cinco estimadores, mismos hiperparametros en todas las corridas:
 
 | Modelo             | Notas                                                          |
 |--------------------|----------------------------------------------------------------|
 | RandomForest       | 300 arboles, max_depth=12, n_jobs=-1                           |
 | LinearSVC          | Envoltorio CalibratedClassifierCV(cv=3, sigmoid) para probs    |
 | LogisticRegression | Solver newton-cholesky, max_iter=2000                          |
+| XGBoost            | 300 arboles, max_depth=6, learning_rate=0.1, n_jobs=-1         |
+| LightGBM           | 300 arboles, learning_rate=0.1, n_jobs=-1                      |
 
-No se usa `class_weight="balanced"` (SMOTENC ya balancea la clase
-minoritaria en entrenamiento).
+Se usa `class_weight="balanced"` por defecto (recomendado por el benchmark
+`reports/balancing_comparison.md`): repondera losses sin resamplear, es
+5-7x mas rapido que SMOTENC y gana en ROC-AUC para todos los modelos
+sobre la mejor combo del 2x2x2. Otras opciones via `--balancing`: smote,
+undersampling-random, undersampling-nearmiss.
 
 ## Pipeline por fold
 
@@ -93,15 +122,24 @@ datos crudos
   -> StratifiedKFold(cv)
   -> por cada fold:
        imputer (mediana numericas, moda categoricas)
-       SMOTENC (sobre-muestrea clase minoritaria)
+       resampleo o reponderado segun --balancing (ver tabla abajo)
        encoder (StandardScaler + OneHotEncoder)
-       ajustar 3 modelos, predecir, calcular metricas
+       ajustar 5 modelos, predecir, calcular metricas
   -> CSVs por fold + resumen mean +/- std
   -> matriz de confusion acumulada por modelo
 ```
 
-SMOTENC corre una vez por fold, no por modelo. Esto evita recomputar el
-vecino mas cercano 3 veces por fold.
+### Balanceo de clases (`--balancing`)
+
+| Valor | Mecanismo |
+|---|---|
+| `class_weight` (default) | No resamplea. Pasa `class_weight="balanced"` a cada modelo (incluido XGBoost, que lo mapea a `scale_pos_weight` internamente). |
+| `smote` | SMOTENC sobre-muestrea la clase minoritaria con sintesis KNN. |
+| `undersampling-random` | `RandomUnderSampler` submuestrea la clase mayoritaria. |
+| `undersampling-nearmiss` | `NearMiss(version=1)` submuestrea por distancia a la minoritaria. |
+
+El resampleo corre una vez por fold, no por modelo. Esto evita recomputar
+el vecino mas cercano 5 veces por fold.
 
 ## Metricas
 
@@ -132,35 +170,55 @@ python brfss_dataset_model_ADDEPEV3.py --subsample 30000 --cv 2
 # Cambiar feature set o target via CLI (solo en el script base)
 python brfss_dataset_model.py --target _MENT14D --feature-set core --cv 3
 
-# Full data (sin --subsample) — ~horas por SMOTENC
+# Full data (sin --subsample) — ~30 min con --balancing class_weight
 python brfss_dataset_model_ADDEPEV3.py --cv 5
+
+# Probar otra estrategia de balanceo (smote, undersampling-random, nearmiss)
+python brfss_dataset_model__MENT14D.py --balancing smote --subsample 100000 --cv 5
+python brfss_dataset_model_ADDEPEV3.py --balancing undersampling-nearmiss --subsample 100000 --cv 5
 ```
+
+### Recomendaciones (de los benchmarks en `reports/`)
+
+- **Mejor combinacion por defecto**: `_MENT14D` + `recommended` +
+  `--include-race` + `--balancing class_weight`. Reproducir con:
+  ```bash
+  python brfss_dataset_model__MENT14D.py \
+    --include-race --subsample 100000 --cv 5
+  ```
+  Espera ~2 min en CPU moderna. LightGBM lidera con ROC-AUC ~0.80 y
+  F1 ~0.79.
+
+- **Para `ADDEPEV3`** (target mas dificil por base rate 21% y senal
+  historica): recall es ~0.40 con todos los modelos; ROC-AUC ~0.79 con
+  LightGBM + race + class_weight. Ver `reports/benchmark_2x2x2.md`.
+
+- **Smoke test rapido** (~30 s): agregar `--subsample 30000 --cv 2`.
+
+- **Sin tuning de hiperparametros**: los defaults de sklearn/XGBoost
+  funcionan bien; el lift medido viene del feature set y la estrategia
+  de balanceo, no del tuning.
 
 Salidas en `metadata/model_results/`:
 
-- `folds_<target>_<feature_set>.csv` — una fila por (modelo, fold, metrica).
-- `summary_<target>_<feature_set>.csv` — mean y std por (modelo, metrica).
-- `cm_<modelo>_<target>_<feature_set>.png` — matriz de confusion acumulada.
+- `folds_<target>_<feature_set>_<balancing>.csv` — una fila por (modelo, fold, metrica).
+- `summary_<target>_<feature_set>_<balancing>.csv` — mean y std por (modelo, metrica).
+- `cm_<modelo>_<target>_<feature_set>_<balancing>.png` — matriz de confusion acumulada.
 
 ## Resultados
 
-Benchmark en subsample 100 000, StratifiedKFold(5). Mejor modelo por fila.
+Los benchmarks detallados viven en `reports/`:
 
-### ADDEPEV3 / recommended
+- **`reports/benchmark_2x2x2.md`** — 8 corridas (2 targets × 2 feature sets
+  × 2 estados de `--include-race`), 100k subsample, 5-fold CV.
+  Headline: `_MENT14D` + `recommended` + `--include-race` con LightGBM
+  alcanza ROC-AUC 0.7986 y F1 0.7904 — la mejor combo del barrido.
 
-| Modelo             | acc   | F1    | ROC-AUC | PR-AUC | Brier |
-|--------------------|-------|-------|---------|--------|-------|
-| RandomForest       | 0.758 | 0.493 | 0.765   | 0.502  | 0.167 |
-| LinearSVC          | 0.723 | 0.479 | 0.743   | 0.485  | 0.184 |
-| LogisticRegression | 0.720 | 0.473 | 0.741   | 0.489  | 0.185 |
+- **`reports/balancing_comparison.md`** — 4 estrategias de balanceo
+  sobre la mejor combo del 2x2x2. Headline: `class_weight` gana en
+  ROC-AUC para todos los modelos y es 5-7x mas rapido que `smote`.
 
-### _MENT14D / recommended
-
-| Modelo             | acc   | F1    | ROC-AUC | PR-AUC | Brier |
-|--------------------|-------|-------|---------|--------|-------|
-| RandomForest       | 0.725 | 0.768 | 0.793   | 0.839  | 0.184 |
-| LinearSVC          | 0.706 | 0.745 | 0.775   | 0.823  | 0.192 |
-| LogisticRegression | 0.709 | 0.752 | 0.775   | 0.823  | 0.191 |
+Metrica principal: **ROC-AUC**, complementada con **PR-AUC** y **Brier**.
 
 ## Estructura del repo
 
@@ -181,9 +239,12 @@ metadata/
     target_comparison.csv             # 4 targets: prevalence, AUC, F1
     target_comparison.md
   model_results/
-    folds_<target>_<set>.csv
-    summary_<target>_<set>.csv
-    cm_<modelo>_<target>_<set>.png
+    folds_<target>_<set>_<balancing>.csv
+    summary_<target>_<set>_<balancing>.csv
+    cm_<modelo>_<target>_<set>_<balancing>.png
+reports/
+  benchmark_2x2x2.md                  # 8 corridas: 2 targets x 2 sets x 2 race
+  balancing_comparison.md             # 4 estrategias de balanceo sobre la mejor combo
 ```
 
 ## Auditoria de features
@@ -213,6 +274,8 @@ numpy
 scikit-learn
 imbalanced-learn
 matplotlib
+xgboost
+lightgbm
 ```
 
 Instalacion:
@@ -225,11 +288,20 @@ pip install -r requirements.txt
 
 ## Limitaciones
 
-- Subsample de 100 000 para benchmarks. Full data: ~horas por SMOTENC.
-- Sin tuning de hiperparametros (default de sklearn).
-- Sin XGBoost / LightGBM (no instalados).
-- `_RACE` se one-hot-encodea; target encoding seria ligeramente mejor.
-- El "always no" baseline para ADDEPEV3 es 79% accuracy; los modelos
-  quedan por debajo de ese numero porque SMOTENC los empuja a predecir
-  positivo. Para screening, el recall (0.55-0.65 en ADDEPEV3) es la
-  metrica relevante.
+- Subsample de 100 000 para benchmarks. Full data con `--balancing
+  class_weight` (default) corre en ~30 min; con `smote` o
+  `undersampling-nearmiss` seria ~5-7x mas lento por el KNN del
+  resampleo.
+- Sin tuning de hiperparametros (defaults de sklearn / XGBoost /
+  LightGBM). El lift medido en los benchmarks viene del feature set y la
+  estrategia de balanceo, no del tuning.
+- `ADDEPEV3` (depresion de por vida) es un target dificil: base rate
+  21%, recall ~0.40 con todos los modelos, AUC ~0.79. El "always no"
+  baseline da 79% accuracy, pero eso enmascara el problema (recall ~0).
+  Para screening, el recall es la metrica relevante y sigue siendo bajo.
+- `_MENT14D` (14+ dias de mala salud mental reciente) es un target mas
+  facil: base rate 60%, senal current-state, AUC ~0.80, F1 ~0.79.
+- `_RACE` es opt-in via `--include-race`. Cuando se incluye, es
+  mean-encoded (no one-hot) para preservar el sample size.
+- Threshold fijo en 0.5. Para `ADDEPEV3` ajustarlo puede mejorar recall
+  a costa de precision, pero el limite real es la senal insuficiente.

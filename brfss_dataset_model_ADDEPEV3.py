@@ -1,29 +1,12 @@
 # -*- coding: utf-8 -*-
-"""BRFSS 2024 — Prediccion de ADDEPEV3 (depresion de por vida) con el set "recommended".
+"""Wrapper delgado: ADDEPEV3 (depresion de por vida) con el set "recommended".
 
-Wrapper delgado sobre brfss_dataset_model.main() con --target=ADDEPEV3 y
---feature-set=recommended como defaults. Si el usuario pasa --target o
---feature-set en la linea de comandos, sus valores tienen precedencia.
 Logica real en brfss_dataset_model.py.
-
-Uso:
-    python brfss_dataset_model_ADDEPEV3.py --subsample 100000 --cv 5
-    python brfss_dataset_model_ADDEPEV3.py --target _MENT14D --cv 3
 """
 import sys
+from brfss_dataset_model import main
 
-# Defaults del wrapper; se prependen solo si el usuario no los paso.
-# argparse usa la ultima ocurrencia de cada flag, asi que los valores del
-# usuario (si estan) quedan al final y ganan.
-_DEFAULTS = ("--target", "ADDEPEV3", "--feature-set", "recommended")
-existing = sys.argv[1:]
-prefix: list[str] = []
-for i in range(0, len(_DEFAULTS), 2):
-    flag = _DEFAULTS[i]
-    if flag not in existing:
-        prefix += [flag, _DEFAULTS[i + 1]]
-sys.argv = [sys.argv[0]] + prefix + existing
-
-from brfss_dataset_model import main  # noqa: E402
-
-main()
+main(
+    defaults=["--target", "ADDEPEV3", "--feature-set", "recommended"],
+    user_argv=sys.argv[1:],
+)
