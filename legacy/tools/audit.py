@@ -339,7 +339,6 @@ def write_audit_md(audit: pd.DataFrame, path: Path) -> None:
         "_INCOMG1", "EMPLOY1", "GENHLTH", "_HLTHPL2",
         "LSATISFY", "SDLONELY",
         "DIABETE4", "CVDINFR4", "ASTHMA3", "HAVARTH4",
-        "ace_score",
     }
     lines.append("## Strong-prior variables not yet in the model\n")
     lines.append("| name | tier | rf | univariate | mi |")

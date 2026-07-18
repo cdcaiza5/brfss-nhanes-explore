@@ -2,13 +2,12 @@
 """BRFSS 2024 — Libreria de prediccion de salud mental.
 
 Modulo principal del pipeline. Exporta la logica reusable y un punto de
-entrada CLI (`main()`). Los wrappers brfss_dataset_model_ADDEPEV3.py y
-brfss_dataset_model__MENT14D.py son puntos de entrada finos que importan
-`main` desde aca y hardcodean target/feature-set por CLI.
+entrada CLI (`main()`). El wrapper brfss_dataset_model_ADDEPEV3.py es un
+punto de entrada fino que importa `main` desde aca y hardcodea el
+feature-set por CLI.
 
-Targets soportados:
+Target:
   - ADDEPEV3: diagnostico de depresion de por vida (1=Si / 2=No).
-  - _MENT14D: 14 o mas dias de mala salud mental en los ultimos 30.
 
 Pipeline por fold:
   1. Imputacion (mediana para numericas/ordinales, moda para categoricas).
@@ -24,7 +23,7 @@ recall, F1, specificity, ROC-AUC, PR-AUC, Brier. Escribe un CSV por fold y
 una matriz de confusion acumulada por modelo.
 
 Uso directo:
-    python brfss_dataset_model.py --target _MENT14D --feature-set recommended
+    python brfss_dataset_model.py --feature-set default
 """
 from __future__ import annotations
 
@@ -32,8 +31,8 @@ import argparse
 import sys
 import time
 import warnings
-from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib
 
@@ -57,6 +56,7 @@ from sklearn.metrics import (
     brier_score_loss,
     confusion_matrix,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -80,7 +80,8 @@ DEFAULT_TARGET = "ADDEPEV3"
 # https://www.cdc.gov/brfss/annual_data/annual_2024.htm
 MISSING_VALUE_MAP: dict[str, set[int]] = {
     "ADDEPEV3": {7, 9},
-    "_MENT14D": {9},
+    "_PHYS14D": {9},
+    "_RFHLTH": {9},
     "_AGEG5YR": {14},
     "_SEX": {7, 9},
     "MARITAL": {9},
@@ -100,7 +101,23 @@ MISSING_VALUE_MAP: dict[str, set[int]] = {
     "CHCCOPD3": {7, 9},
     "CVDCRHD4": {7, 9},
     "CVDSTRK3": {7, 9},
+    # rf_top30 categoricals: 9 = rehuso (no es categoria real). ECIGNOW3
+    # ademas tiene 7 = "no sabe" y un 9 no documentado en el codebook.
+    "ECIGNOW3": {7, 9},
+    "_LTASTH1": {9},
+    "_ASTHMS1": {9},
+    "_AIDTST4": {9},
+    "_CASTHM1": {9},
+    "HIVTST7": {7, 9},
+    # Variables nuevas del re-audit rf_top30 (códigos 7/8/9/77/88/99 = missing).
+    "_INCOMG1": {7, 9, 77, 88, 99},
+    "MEDCOST1": {7, 9},
+    "RENTHOM1": {7, 9},
+    "CHECKUP1": {7, 8, 9},
+    "LASTDEN4": {7, 8, 9},
+    "_DRDXAR2": {9},
     "PHYSHLTH": {77, 88, 99},
+    "POORHLTH": {77, 88, 99},
     "DECIDE": {7, 9},
     "DIFFWALK": {7, 9},
     "DIFFDRES": {7, 9},
@@ -115,22 +132,25 @@ MISSING_VALUE_MAP: dict[str, set[int]] = {
     "ACETTHEM": {7, 9}, "ACEHVSEX": {7, 9},
     "ACEADSAF": {7, 9}, "ACEADNED": {7, 9},
     "MENTHLTH": {77, 99},
+    # Anthropometric sentinel codes: 9999 = missing (not handled by _BMI_MISSING).
+    "HEIGHT3": {9999},
+    "WTKG3": {9999},
+    "WEIGHT2": {9999},
+    # Nuevas del set 'default' (seleccionadas sobre el universo completo).
+    # _AGE80: edad imputada colapsada; 77=no sabe, 99=rehuso.
+    "_AGE80": {77, 99},
+    # SEXVAR / CELLSEX3: sexo del encuestado; 7=no sabe, 9=rehuso.
+    "SEXVAR": {7, 9},
+    "CELLSEX3": {7, 9},
+    # HIVTSTD3: fecha ultimo test VIH (estilo fecha); 7/9/77/99 = missing.
+    "HIVTSTD3": {7, 9, 77, 99},
+    # _PACKYRS: anos fumando * paquetes/dia; 9999 = missing.
+    "_PACKYRS": {9999},
 }
 _BMI_MISSING = 9999  # _BMI5 is BMI*100 in the XPT
 
-# Variables ACE con escala binaria (1=Si, 2=No). Para estos, "expuesto" = valor == 1.
-ACE_BINARY = [
-    "ACEDEPRS", "ACEDRINK", "ACEDRUGS", "ACEPRISN", "ACEDIVRC",
-]
-# Variables ACE con escala de frecuencia (1=Nunca, 2=Una vez, 3=Mas de una vez).
-# Para estos, "expuesto" = valor >= 2.
-ACE_FREQ = [
-    "ACEPUNCH", "ACEHURT1", "ACESWEAR", "ACETOUCH", "ACETTHEM", "ACEHVSEX",
-]
-ACE_VARIABLES = ACE_BINARY + ACE_FREQ
-
-CORE_NUMERIC = ["_BMI5"]
-CORE_CATEGORICAL = ["_AGEG5YR", "_SEX", "MARITAL", "EDUCA", "SMOKE100", "DRNKANY6"]
+# Variables ACE (childhood adversity) ya no se usan como feature del preset
+# 'default'; se dejan documentadas por si se quieren reintroducir.
 
 
 # Each target has a "column" to read, and a "binarize" function that takes the
@@ -141,102 +161,49 @@ TARGETS: dict[str, dict] = {
         "binarize": lambda s: (s == 1).astype(float).where(s.notna(), np.nan),
         "description": "Lifetime depression diagnosis (1=Yes / 2=No)",
     },
-    "_MENT14D": {
-        "column": "_MENT14D",
-        "binarize": lambda s: (s == 1).astype(float).where(s.notna(), np.nan),
-        "description": "14+ days of poor mental health in past 30 (computed)",
-    },
 }
 
 
 FEATURE_SETS: dict[str, dict] = {
-    "core": {
-        "numeric": list(CORE_NUMERIC),
-        "ordinal": ["_AGEG5YR", "EDUCA"],
-        "categorical": ["_SEX", "MARITAL", "SMOKE100", "DRNKANY6"],
-        "use_ace": False,
-    },
-    "core+ses": {
-        "numeric": list(CORE_NUMERIC),
-        "ordinal": ["_AGEG5YR", "EDUCA", "GENHLTH"],
+    "default": {
+        # 30 predictores seleccionados sobre el UNIVERSO completo de columnas
+        # (301 menos ID/geo/peso y el target) con RandomForest
+        # (tools/select_rf_top30.py, 100k subsample, RF balanceado). Mutual
+        # information y permutation importance se usaron como contraste. Se
+        # excluyeron _MENT14D (casi-duplicado del target ADDEPEV3) y _STSTR
+        # (estrato de muestreo, no predictor real); se agregaron _PACKYRS y
+        # MEDCOST1 del rango RF siguiente. _RACE se mean-encodea aparte.
+        # El set canonico da ROC-AUC ~0.833 en hold-out (vs ~0.840 del
+        # universo completo de 293 cols).
+        "numeric": [
+            "_BMI5", "_AGE80", "PHYSHLTH", "MENTHLTH", "POORHLTH",
+            "HEIGHT3", "WTKG3", "_PACKYRS",
+        ],
+        "ordinal": ["_AGEG5YR", "GENHLTH", "SDLONELY", "LSATISFY"],
         "categorical": [
-            "_SEX", "MARITAL", "SMOKE100", "DRNKANY6",
-            "_INCOMG1", "EMPLOY1", "_HLTHPL2",
+            "DECIDE", "DIFFALON", "_PHYS14D", "_RFHLTH", "SEXVAR", "_SEX",
+            "ECIGNOW3", "EMPLOY1", "ASTHMA3", "_AIDTST4", "_LTASTH1",
+            "HAVARTH4", "HIVTST7", "CELLSEX3", "HIVTSTD3", "_ASTHMS1",
+            "MEDCOST1", "_DRDXAR2",
         ],
-        "use_ace": False,
-    },
-    "core+ses+aces": {
-        "numeric": list(CORE_NUMERIC) + ["ace_score"],
-        "ordinal": ["_AGEG5YR", "EDUCA", "GENHLTH", "LSATISFY", "SDLONELY"],
-        "categorical": [
-            "_SEX", "MARITAL", "SMOKE100", "DRNKANY6",
-            "_INCOMG1", "EMPLOY1", "_HLTHPL2",
-            "DIABETE4", "CVDINFR4", "ASTHMA3", "HAVARTH4",
-        ],
-        "use_ace": True,
-    },
-    "recommended": {
-        "numeric": list(CORE_NUMERIC) + ["PHYSHLTH", "ace_score"],
-        "ordinal": [
-            "_AGEG5YR", "EDUCA", "GENHLTH",
-            "LSATISFY", "SDLONELY", "EMTSUPRT",
-        ],
-        "categorical": [
-            # Demograficos y sustancias
-            "_SEX", "MARITAL", "SMOKE100", "DRNKANY6",
-            # SES
-            "_INCOMG1", "EMPLOY1", "_HLTHPL2",
-            # Discapacidad cognitiva/fisica
-            "DECIDE", "DIFFWALK", "DIFFDRES", "DIFFALON", "DEAF", "BLIND",
-            # Condiciones cronicas
-            "CHCCOPD3", "CVDINFR4", "CVDCRHD4", "CVDSTRK3",
-            "ASTHMA3", "HAVARTH4", "DIABETE4",
-        ],
-        "mean_encoded": [],
-        "use_ace": True,
+        "mean_encoded": ["_RACE"],
     },
 }
 
 
-@dataclass(frozen=True)
-class RunConfig:
-    """Configuracion inmutable de una corrida.
-
-    `spec` ya incluye el efecto de los flags runtime (ej. `--include-race`
-    agrega `_RACE` a `mean_encoded`). `columns_needed` y `feature_cols` se
-    derivan una sola vez en `resolve_config` y se reutilizan en I/O y en el
-    loop de CV. `balancing` es el valor codificado de `--balancing`
-    (ej. `undersampling-nearmiss`).
-    """
-    target_name: str
-    feature_set_name: str
-    target_spec: dict
-    spec: dict
-    xpt_path: Path
-    out_dir: Path
-    cv: int
-    seed: int
-    subsample: int | None
-    columns_needed: tuple[str, ...]
-    feature_cols: tuple[str, ...]
-    balancing: str
-
-
-def resolve_config(args: argparse.Namespace) -> RunConfig:
+def resolve_config(args: argparse.Namespace) -> SimpleNamespace:
     """Resuelve la configuracion completa de una corrida a partir de argparse.
 
     Unico lugar que conoce el borde entre spec (definicion) y runtime config
     (flags como `--include-race`). Calcula `columns_needed` y `feature_cols`
     una sola vez, deduplicando.
     """
-    target_spec = TARGETS[args.target]
+    # El target es siempre ADDEPEV3 (unico soportado). Hardcodeado aqui para
+    # no exponer un flag que ya no tiene alternativas.
+    target_spec = TARGETS[DEFAULT_TARGET]
     spec = FEATURE_SETS[args.feature_set]
-    if args.include_race:
-        spec = {
-            **spec,
-            "mean_encoded": list(spec.get("mean_encoded", [])) + ["_RACE"],
-        }
-    use_ace = spec["use_ace"]
+    # `_RACE` ya viene en `mean_encoded` del preset. Asi los conteos
+    # n_num/n_cat y el imputer/encoder quedan consistentes con feature_cols.
 
     columns_needed = (
         spec["numeric"]
@@ -244,8 +211,6 @@ def resolve_config(args: argparse.Namespace) -> RunConfig:
         + spec["categorical"]
         + spec.get("mean_encoded", [])
     )
-    if use_ace:
-        columns_needed = list(columns_needed) + list(ACE_VARIABLES)
     columns_needed = tuple(dict.fromkeys(columns_needed))
 
     feature_cols = (
@@ -255,8 +220,8 @@ def resolve_config(args: argparse.Namespace) -> RunConfig:
         + spec.get("mean_encoded", [])
     )
 
-    return RunConfig(
-        target_name=args.target,
+    return SimpleNamespace(
+        target_name=DEFAULT_TARGET,
         feature_set_name=args.feature_set,
         target_spec=target_spec,
         spec=spec,
@@ -268,6 +233,8 @@ def resolve_config(args: argparse.Namespace) -> RunConfig:
         columns_needed=columns_needed,
         feature_cols=tuple(feature_cols),
         balancing=args.balancing,
+        threshold_metric=args.threshold_metric,
+        cost_ratio=args.cost_ratio,
     )
 
 
@@ -286,26 +253,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, default=DEFAULT_OUT,
                    help="Directorio de salida para CSVs y figuras.")
     p.add_argument(
-        "--target",
-        choices=list(TARGETS),
-        default=DEFAULT_TARGET,
-        help="Variable objetivo a predecir.",
-    )
-    p.add_argument(
         "--feature-set",
         choices=list(FEATURE_SETS),
-        default="recommended",
-        help="Conjunto de predictores a usar.",
+        default="default",
+        help="Conjunto de predictores a usar (unico preset: 'default').",
     )
     p.add_argument("--cv", type=int, default=5,
                    help="Cantidad de folds para StratifiedKFold.")
     p.add_argument("--seed", type=int, default=SEED,
                    help="Semilla aleatoria.")
-    p.add_argument(
-        "--include-race",
-        action="store_true",
-        help="Incluye _RACE como feature mean-encoded (calculado por fold). Sin este flag, _RACE no se incluye en el dataset.",
-    )
     p.add_argument(
         "--subsample",
         type=int,
@@ -326,6 +282,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "'undersampling-random' (submuestreo aleatorio), "
              "'undersampling-nearmiss' (NearMiss-1, submuestreo por distancia).",
     )
+    p.add_argument(
+        "--threshold-metric",
+        choices=["f1", "youden", "cost"],
+        default="f1",
+        help="Metrica para optimizar el umbral de decision sobre las "
+             "predicciones out-of-fold (no usa datos de test).",
+    )
+    p.add_argument(
+        "--cost-ratio",
+        type=float,
+        default=1.0,
+        help="Costo de FN relativo a FP para el umbral 'cost' "
+             "(default 1.0 = equally weighted).",
+    )
     return p.parse_args(argv)
 
 
@@ -342,7 +312,7 @@ def load_and_clean(xpt_path: Path, columns: list[str], target_name: str) -> pd.D
     Args:
         xpt_path: ruta al archivo XPT.
         columns: predictores a cargar.
-        target_name: clave en TARGETS (ej. "ADDEPEV3" o "_MENT14D").
+        target_name: clave en TARGETS (ej. "ADDEPEV3").
 
     Returns:
         DataFrame limpio con columna "target" binaria (0/1).
@@ -357,7 +327,7 @@ def load_and_clean(xpt_path: Path, columns: list[str], target_name: str) -> pd.D
         df["_BMI5"] = df["_BMI5"].replace(_BMI_MISSING, np.nan) / 100.0
     # Mapea 88 ("None" = 0 dias) a 0 antes de tratar missing codes, para
     # no perder la informacion de "0 dias de salud fisica/mental mala".
-    for col in ("PHYSHLTH", "MENTHLTH"):
+    for col in ("PHYSHLTH", "MENTHLTH", "POORHLTH"):
         if col in df.columns:
             df[col] = df[col].replace(88, 0)
     for col, codes in MISSING_VALUE_MAP.items():
@@ -367,49 +337,6 @@ def load_and_clean(xpt_path: Path, columns: list[str], target_name: str) -> pd.D
     df = df.dropna(subset=[target_col])
     df["target"] = target_spec["binarize"](df[target_col])
     df = df.drop(columns=[target_col])
-    return df
-
-
-def add_ace_score(df: pd.DataFrame) -> pd.DataFrame:
-    """Calcula ace_score como conteo de ACEs reportados como 'Si' o 'al menos una vez'.
-
-    Los 11 items ACE usan dos escalas distintas:
-      - ACE_BINARY (5 items): 1=Si, 2=No. Se cuenta == 1.
-      - ACE_FREQ (6 items): 1=Nunca, 2=Una vez, 3=Mas de una vez. Se cuenta >= 2.
-    Si todos los items ACE son NaN para una fila, ace_score queda en NaN
-    (se imputara con la mediana en el pipeline).
-
-    Args:
-        df: DataFrame con las columnas ACE presentes.
-
-    Returns:
-        DataFrame con nueva columna 'ace_score' (int, en [0, 11], o NaN).
-    """
-    df = df.copy()
-    binary_present = [v for v in ACE_BINARY if v in df.columns]
-    freq_present = [v for v in ACE_FREQ if v in df.columns]
-    if not binary_present and not freq_present:
-        return df
-
-    score = pd.Series(0.0, index=df.index, dtype=float)
-    n_observed = pd.Series(0, index=df.index, dtype=int)
-
-    for v in binary_present:
-        s = df[v]
-        # 1=Si cuenta como 1; NaN cuenta como 0 (no observado, sin aporte).
-        score = score + (s == 1).astype(float).fillna(0)
-        n_observed = n_observed + s.notna().astype(int)
-
-    for v in freq_present:
-        s = df[v]
-        # 2 o 3 cuentan como 1; NaN cuenta como 0.
-        score = score + (s >= 2).astype(float).fillna(0)
-        n_observed = n_observed + s.notna().astype(int)
-
-    # Si todos los items ACE fueron NaN, dejar ace_score en NaN para que
-    # el pipeline lo impute (en vez de quedar en 0, que diria "ningun ACE").
-    score[n_observed == 0] = np.nan
-    df["ace_score"] = score
     return df
 
 
@@ -523,11 +450,12 @@ def make_resampler(
 
 
 def build_models(
-    seed: int, class_weight: str | dict | None = None
+    seed: int,
+    class_weight: str | dict | None = None,
 ) -> dict[str, BaseEstimator]:
     """Construye el dict de modelos a evaluar.
 
-    Cinco modelos:
+    Cinco modelos base:
       - RandomForest (sin calibrar, probs razonablemente calibradas para ROC-AUC).
       - LinearSVC envuelto en CalibratedClassifierCV (cv=3, sigmoid) para
         obtener predict_proba y poder calcular Brier/ROC-AUC.
@@ -594,7 +522,7 @@ def main(
 
     Args:
         defaults: argumentos de linea de comandos aplicados como defaults
-            (los wrappers los usan para fijar `--target` y `--feature-set`).
+            (los wrappers los usan para fijar `--feature-set`).
         user_argv: argumentos del usuario (None usa sys.argv[1:]).
 
     Returns:
@@ -608,7 +536,6 @@ def main(
     config = resolve_config(args)
     np.random.seed(config.seed)
     spec = config.spec
-    use_ace = spec["use_ace"]
 
     print(
         f"[load] reading {config.xpt_path}  usecols={len(config.columns_needed)+1}  "
@@ -618,8 +545,6 @@ def main(
     df = load_and_clean(
         config.xpt_path, list(config.columns_needed), config.target_name
     )
-    if use_ace:
-        df = add_ace_score(df)
     print(
         f"[clean] rows={len(df):,}  positive_rate={df['target'].mean():.4f}  "
         f"({time.time() - t0:.1f}s)"
@@ -643,11 +568,12 @@ def main(
     skf = StratifiedKFold(
         n_splits=config.cv, shuffle=True, random_state=config.seed
     )
-    n_num = (
-        len(spec["numeric"])
-        + len(spec.get("ordinal", []))
-        + len(spec.get("mean_encoded", []))
+    num_cols = (
+        list(spec["numeric"])
+        + list(spec.get("ordinal", []))
+        + list(spec.get("mean_encoded", []))
     )
+    n_num = len(num_cols)
     n_cat = len(spec["categorical"])
     resampler = make_resampler(config.balancing, n_num, n_cat, config.seed)
     class_weight_arg = (
@@ -658,6 +584,9 @@ def main(
     cm_acc: dict[str, np.ndarray] = {
         n: np.zeros((2, 2), dtype=int) for n in models
     }
+    # Acumuladores out-of-fold para elegir el umbral por modelo (sin leakage).
+    oof_true: dict[str, list] = {n: [] for n in models}
+    oof_proba: dict[str, list] = {n: [] for n in models}
 
     print(
         f"[run] target={config.target_name}  feature_set={config.feature_set_name}  "
@@ -681,12 +610,7 @@ def main(
             X_tr[col] = train_enc
             X_te[col] = test_enc
 
-        imputer = clone(make_imputer(
-            spec["numeric"]
-            + spec.get("ordinal", [])
-            + spec.get("mean_encoded", []),
-            spec["categorical"],
-        ))
+        imputer = clone(make_imputer(num_cols, spec["categorical"]))
         X_tr_imp = imputer.fit_transform(X_tr)
         X_te_imp = imputer.transform(X_te)
 
@@ -707,10 +631,12 @@ def main(
         X_te_enc = encoder.transform(X_te_imp)
 
         for name, base_model in models.items():
-            m = clone(base_model)
-            m.fit(X_tr_enc, y_tr_res)
-            y_pred = m.predict(X_te_enc)
-            y_proba = m.predict_proba(X_te_enc)[:, 1]
+            est = clone(base_model)
+            est.fit(X_tr_enc, y_tr_res)
+            y_pred = est.predict(X_te_enc)
+            y_proba = est.predict_proba(X_te_enc)[:, 1]
+            oof_true[name].append(y_te.values)
+            oof_proba[name].append(y_proba)
             cm = confusion_matrix(y_te, y_pred)
             cm_acc[name] += cm
             tn, fp, fn, tp = cm.ravel()
@@ -749,6 +675,64 @@ def main(
             f"{time.time() - t_fold:.1f}s"
         )
 
+    # Umbral optimo por modelo sobre predicciones out-of-fold (sin leakage).
+    # precision_recall_curve devuelve thresholds de largo n-1; los ultimos
+    # precision/recall (en el extremo) se ignoran. Se elige el indice que
+    # maximiza la metrica pedida, y se reportan las metricas de etiqueta en
+    # ese umbral (ROC-AUC/PR-AUC/brier usan probabilidades y no cambian).
+    def best_threshold(y_t: np.ndarray, y_p: np.ndarray) -> float:
+        prec, rec, thr = precision_recall_curve(y_t, y_p)
+        if len(thr) == 0:
+            return 0.5
+        if config.threshold_metric == "f1":
+            score = 2 * prec * rec / (prec + rec + 1e-12)
+        elif config.threshold_metric == "youden":
+            score = rec + prec - 1.0
+        else:  # cost: maximizar recall - cost_ratio*(1-precision)
+            score = rec - config.cost_ratio * (1.0 - prec)
+        return float(thr[int(np.nanargmax(score))])
+
+    best_thr: dict[str, float] = {}
+    thr_cm: dict[str, np.ndarray] = {n: np.zeros((2, 2), dtype=int) for n in models}
+    for name in models:
+        y_t = np.concatenate(oof_true[name])
+        y_p = np.concatenate(oof_proba[name])
+        t = best_threshold(y_t, y_p)
+        best_thr[name] = t
+        y_pred_t = (y_p >= t).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_t, y_pred_t).ravel()
+        thr_metrics = {
+            "accuracy": accuracy_score(y_t, y_pred_t),
+            "precision": precision_score(y_t, y_pred_t, zero_division=0),
+            "recall": recall_score(y_t, y_pred_t, zero_division=0),
+            "f1": f1_score(y_t, y_pred_t, zero_division=0),
+            "specificity": tn / (tn + fp) if (tn + fp) > 0 else 0.0,
+        }
+        for k, v in thr_metrics.items():
+            rows.append(
+                {
+                    "target": config.target_name,
+                    "model": name,
+                    "feature_set": config.feature_set_name,
+                    "fold": "OOF",
+                    "metric": f"{k}@thr",
+                    "value": v,
+                    "balancing": config.balancing,
+                }
+            )
+        rows.append(
+            {
+                "target": config.target_name,
+                "model": name,
+                "feature_set": config.feature_set_name,
+                "fold": "OOF",
+                "metric": "threshold",
+                "value": t,
+                "balancing": config.balancing,
+            }
+        )
+        thr_cm[name] = confusion_matrix(y_t, y_pred_t)
+
     out_df = pd.DataFrame(rows)
     config.out_dir.mkdir(parents=True, exist_ok=True)
     fname_prefix = (
@@ -775,7 +759,11 @@ def main(
     print(pivot_std.round(3).to_string())
     print(f"\nTotal time: {time.time() - t_total:.1f}s")
 
-    for name, cm in cm_acc.items():
+    print("\n=== Best threshold (OOF, metric=%s) ===" % config.threshold_metric)
+    for name in models:
+        print(f"  {name:>20s}  thr={best_thr[name]:.3f}")
+
+    for name, cm in thr_cm.items():
         fig, ax = plt.subplots(figsize=(4, 4))
         im = ax.imshow(cm, cmap="Blues")
         ax.set_xticks([0, 1])
@@ -795,7 +783,8 @@ def main(
                     color="white" if cm[i, j] > cm.max() / 2 else "black",
                 )
         ax.set_title(
-            f"{name} — {config.target_name} / {config.feature_set_name} ({config.cv}-fold CM)"
+            f"{name} — {config.target_name} / {config.feature_set_name} "
+            f"({config.cv}-fold CM @thr={best_thr[name]:.2f})"
         )
         fig.colorbar(im, ax=ax)
         fig.tight_layout()
@@ -806,7 +795,7 @@ def main(
 
     print(f"\nWrote:")
     print(f"  {folds_path}")
-    print(f"  {config.out_dir / f'summary_{config.feature_set_name}.csv'}")
+    print(f"  {config.out_dir / f'summary_{fname_prefix}.csv'}")
     print(f"  {config.out_dir}/cm_*.png")
     return 0
 
