@@ -315,6 +315,8 @@ metadata/
   columns/
     brfss_2024_columns.csv            # 301 filas: position, name, label
     brfss_2024_columns.md
+  feature_selection/
+    default_selection.md              # reporte de seleccion del set default
   model_results/                      # salidas del pipeline (folds, summary, CM)
 reports/
   final_results.md                   # reporte final (5-fold full data, metricas + config)
@@ -325,10 +327,12 @@ legacy/                               # archivos de versiones anteriores (histor
 ## Seleccion de features y target
 
 El set `default` se produce con `tools/select_rf_top30.py` sobre el
-universo completo de 301 columnas (menos ID/geo/peso y el target):
-RandomForest importance + informacion mutua + permutation importance como
-contraste. El canonico es el top-30 de RF. Ver `reports/changes_and_results.md`
-para el detalle.
+universo completo de 301 columnas (menos ID/geo/peso/estructurales y el
+target): RandomForest importance + informacion mutua + permutation
+importance como contraste. El canonico es el top-30 de RF. El reporte de
+seleccion (rankings, scores, overlap) se escribe en
+`metadata/feature_selection/default_selection.md`; ver tambien
+`reports/changes_and_results.md` para el detalle del proceso.
 
 El target es `ADDEPEV3` (diagnostico de depresion de por vida), la unica
 variable de diagnostico de depresion explicita en las 301 columnas. La

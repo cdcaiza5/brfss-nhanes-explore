@@ -15,7 +15,9 @@ one-hot (drop="if_binary"). No es parte del pipeline: script de
 re-audit, se corre bajo demanda. Imprime ambos rankings y la comparacion
 de permutation importance.
 """
+import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -38,8 +40,15 @@ SUBSAMPLE = 100_000
 TOP_N = 30
 N_SPLITS_HOLDOUT = 0.3  # fraccion para el fold de permutation importance
 
-# Columnas fuera del universo de candidatos: ID, geo y pesos de diseno.
-EXCLUDE = ["ADDEPEV3", "_STATE", "SEQNO", "_PSU", "_STRWT", "_WT2RAKE"]
+# Columnas fuera del universo de candidatos: ID, geo, pesos de diseno y
+# variables estructurales/no-predictoras.
+EXCLUDE = [
+    "ADDEPEV3",            # target
+    "_STATE", "SEQNO", "_PSU", "_STRWT", "_WT2RAKE",  # ID / geo / pesos
+    "_LLCPWT", "_LLCPWT2", "_CLLCPWT",  # pesos de diseno (no predictores)
+    "IDATE",                # fecha de entrevista (estructural)
+    "WEIGHT2",              # peso en libras (redundante con WTKG3, computado)
+]
 
 
 def all_candidate_columns() -> list[str]:
@@ -61,6 +70,14 @@ def mean_encode(train_s, y_train, test_s, alpha=10.0):
 
 
 def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--out", type=Path,
+        default=m.REPO_DIR / "metadata" / "feature_selection" / "default_selection.md",
+        help="Archivo markdown donde escribir el reporte de seleccion.",
+    )
+    args = p.parse_args()
+
     candidates = all_candidate_columns()
     # _RACE se trata aparte (mean-encoded); el resto son numericas/ordinales
     # o categoricas nominales. Para el universo completo no conocemos el tipo
@@ -167,6 +184,75 @@ def main():
     canonical = list(rf_top.index)
     print("\n=== SET CANONICO (top-30 RF, columnas originales) ===")
     print(canonical)
+
+    # --- Escribir reporte markdown ---
+    write_report(
+        args.out, rf_top, mi_top, perm, overlap, canonical,
+        rf_train_auc=roc_auc_score(y_tr, rf.predict_proba(Xf)[:, 1]),
+        rf_test_auc=roc_auc_score(y_te, rf.predict_proba(Xf_test)[:, 1]),
+        rf30_test_auc=roc_auc_score(y_te, rf30.predict_proba(Xf_test_top)[:, 1]),
+    )
+    print(f"\nWrote {args.out}")
+
+
+def write_report(path, rf_top, mi_top, perm, overlap, canonical,
+                 rf_train_auc, rf_test_auc, rf30_test_auc):
+    """Escribe el reporte de seleccion como markdown."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# Seleccion del preset `default` — {date.today().isoformat()}",
+        "",
+        "Seleccion de las 30 mejores variables para `ADDEPEV3` sobre el universo",
+        f"completo de columnas (menos ID/geo/peso/estructurales y el target).",
+        f"Generado por `tools/select_rf_top30.py` (seed {SEED}, subsample {SUBSAMPLE:,}).",
+        "",
+        "## Techo de ranking",
+        "",
+        f"- RF sobre el universo completo (train): **{rf_train_auc:.4f}**",
+        f"- RF sobre el universo completo (test): **{rf_test_auc:.4f}**",
+        f"- RF sobre el top-30 canonico (test): **{rf30_test_auc:.4f}**",
+        f"  (delta vs universo: {rf30_test_auc - rf_test_auc:+.4f})",
+        "",
+        "## TOP 30 — RandomForest (canonico)",
+        "",
+        "| rank | variable | importancia RF |",
+        "|---|---|---|",
+    ]
+    for i, (nm, v) in enumerate(rf_top.items(), 1):
+        lines.append(f"| {i} | `{nm}` | {v:.5f} |")
+    lines += ["", "## TOP 30 — Mutual Information (contraste)", "",
+              "| rank | variable | MI |", "|---|---|---|"]
+    for i, (nm, v) in enumerate(mi_top.items(), 1):
+        lines.append(f"| {i} | `{nm}` | {v:.5f} |")
+    lines += ["", "## Permutation importance (RF, ROC-AUC drop, top-30 RF)", "",
+              "| variable | ROC-AUC drop |", "|---|---|"]
+    for nm in rf_top.index:
+        lines.append(f"| `{nm}` | {perm.get(nm, float('nan')):.5f} |")
+    lines += [
+        "",
+        "## Overlap RF ∩ MI",
+        "",
+        f"{len(overlap)} / {TOP_N} compartidas entre el top-30 de RF y el top-30 de MI.",
+        "",
+        "## Set canonico (top-30 RF)",
+        "",
+        "```",
+        ", ".join(f"`{c}`" for c in canonical),
+        "```",
+        "",
+        "## Notas",
+        "",
+        "- El canonico es el top-30 de RF. MI sirve de contraste; tiende a",
+        "  contaminarse con pesos de diseno y variables estructurales, por eso",
+        "  no se usa como set final.",
+        "- `_RACE` se mean-encodea aparte en el pipeline (no entra en las 30).",
+        "- El preset `default` en `brfss_dataset_model.py` aplica dos sustituciones",
+        "  manuales sobre este top-30: quita `_MENT14D` (casi-duplicado del",
+        "  target) y `_STSTR` (estrato de muestreo), y agrega `_PACKYRS` y",
+        "  `MEDCOST1` del rango RF siguiente.",
+        "",
+    ]
+    path.write_text("\n".join(lines))
 
 
 def permutation_import_score(est, X_test, y_test, names, n_repeats=3):
