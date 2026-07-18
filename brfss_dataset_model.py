@@ -126,11 +126,6 @@ MISSING_VALUE_MAP: dict[str, set[int]] = {
     "BLIND": {7, 9},
     "EMTSUPRT": {7, 9, 77, 99},
     "_RACE": {9},
-    "ACEDEPRS": {7, 9}, "ACEDRINK": {7, 9}, "ACEDRUGS": {7, 9},
-    "ACEPRISN": {7, 9}, "ACEDIVRC": {7, 9}, "ACEPUNCH": {7, 9},
-    "ACEHURT1": {7, 9}, "ACESWEAR": {7, 9}, "ACETOUCH": {7, 9},
-    "ACETTHEM": {7, 9}, "ACEHVSEX": {7, 9},
-    "ACEADSAF": {7, 9}, "ACEADNED": {7, 9},
     "MENTHLTH": {77, 99},
     # Anthropometric sentinel codes: 9999 = missing (not handled by _BMI_MISSING).
     "HEIGHT3": {9999},
@@ -148,9 +143,6 @@ MISSING_VALUE_MAP: dict[str, set[int]] = {
     "_PACKYRS": {9999},
 }
 _BMI_MISSING = 9999  # _BMI5 is BMI*100 in the XPT
-
-# Variables ACE (childhood adversity) ya no se usan como feature del preset
-# 'default'; se dejan documentadas por si se quieren reintroducir.
 
 
 # Each target has a "column" to read, and a "binarize" function that takes the

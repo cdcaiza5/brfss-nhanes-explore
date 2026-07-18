@@ -28,7 +28,11 @@ target) con RandomForest (`tools/select_rf_top30.py`, 100k subsample, RF
 balanceado); mutual information y permutation importance se usaron como
 contraste. Se excluyeron `_MENT14D` (casi-duplicado del target ADDEPEV3) y
 `_STSTR` (estrato de muestreo, no predictor real). `_RACE` se agrega
-aparta como columna mean-encoded (no cuenta dentro de las 30).
+aparta como columna mean-encoded (no cuenta dentro de las 30). Las
+variables ACE (childhood adversity) estaban en el pool de candidatos pero
+ninguna entro al top-30 del RF — probablemente por su alta missingness
+(modulo opcional en BRFSS, muchos estados no lo administran). No se usa
+`ace_score` ni los items ACE individuales en el preset `default`.
 
 | Preset  | Total predictores | Numericas | Ordinales | Categoricas | `_RACE` |
 |---------|-------------------|-----------|-----------|-------------|---------|
@@ -80,20 +84,6 @@ Aplicada en `load_and_clean`:
    9 = "rehuso", 14 = missing en `_AGEG5YR`, 77/88/99 en escalas
    continuas. Se reemplazan por NaN.
 4. **Filas con target NaN se descartan** (no se imputa el target).
-5. **`ace_score`**: conteo de los 11 items ACE.
-
-### `ace_score` — detalle
-
-Los items ACE tienen dos escalas distintas:
-
-- **Binarios** (5 items: `ACEDEPRS`, `ACEDRINK`, `ACEDRUGS`, `ACEPRISN`,
-  `ACEDIVRC`): 1=Si, 2=No. Se cuenta `== 1`.
-- **Frecuencia** (6 items: `ACEPUNCH`, `ACEHURT1`, `ACESWEAR`, `ACETOUCH`,
-  `ACETTHEM`, `ACEHVSEX`): 1=Nunca, 2=Una vez, 3=Mas de una vez. Se
-  cuenta `>= 2`.
-
-Si todos los items ACE son NaN para una fila, `ace_score` queda en NaN
-y se imputa con la mediana.
 
 ## Modelos
 
