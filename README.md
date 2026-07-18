@@ -40,6 +40,20 @@ salud (`MENTHLTH`, `POORHLTH`, `_PHYS14D`, `_RFHLTH`) estan incluidas: no
 son leakage del target (diagnostico de por vida) pero inflan el
 performance por ser del mismo constructo.
 
+### Las 30 variables del preset `default`
+
+Numericas (8): `_BMI5`, `_AGE80`, `PHYSHLTH`, `MENTHLTH`, `POORHLTH`,
+`HEIGHT3`, `WTKG3`, `_PACKYRS`.
+
+Ordinales (4): `_AGEG5YR`, `GENHLTH`, `SDLONELY`, `LSATISFY`.
+
+Categoricas (18): `DECIDE`, `DIFFALON`, `_PHYS14D`, `_RFHLTH`, `SEXVAR`,
+`_SEX`, `ECIGNOW3`, `EMPLOY1`, `ASTHMA3`, `_AIDTST4`, `_LTASTH1`,
+`HAVARTH4`, `HIVTST7`, `CELLSEX3`, `HIVTSTD3`, `_ASTHMS1`, `MEDCOST1`,
+`_DRDXAR2`.
+
+Mean-encoded (extra, fuera del conteo de 30): `_RACE`.
+
 Las **numericas** (`_BMI5`, `_AGE80`, `PHYSHLTH`, `MENTHLTH`, `POORHLTH`,
 `HEIGHT3`, `WTKG3`, `_PACKYRS`) y **ordinales** (`_AGEG5YR`, `GENHLTH`,
 `SDLONELY`, `LSATISFY`) se tratan como continuas (mediana + StandardScaler).
