@@ -218,6 +218,84 @@ cambios — que se probo, que se mantuvo y que se descarto — vive en
 
 Metrica principal: **ROC-AUC**, complementada con **PR-AUC** y **Brier**.
 
+## Decisiones de diseno
+
+Decisiones tomadas para mejorar las metricas del pipeline. Cada entrada
+dice que es, por que ayuda (o por que no), y el impacto medido en full
+data (455k, 5-fold CV). Detalle completo del proceso en
+`reports/changes_and_results.md`; numeros finales en `reports/final_results.md`.
+
+### Mantenidas
+
+**Preset unico `default` desde el universo completo**
+- Que es: un solo feature set de 30 predictores, seleccionados de las 301
+  columnas del BRFSS (menos ID/geo/peso y el target) con RandomForest
+  importance (+ informacion mutua + permutation como contraste). Reemplaza
+  los presets `recommended`/`rf_top30` y elimina la logica de `use_ace`/
+  `ace_score`.
+- Por que ayuda: los presets anteriores usaban un pool curado a mano de
+  ~50 columnas. Escanear el universo completo deja que el RF encuentre
+  predictores que la curacion manual dejo fuera (ej. `_AGE80`, `HEIGHT3`,
+  `WTKG3`, `_PACKYRS`, `SEXVAR`). RF sobre 293 columnas da ROC-AUC 0.8405;
+  el top-30 canonico da 0.8332 — solo 0.7 pts por debajo del universo, asi
+  que las 30 columnas capturan casi toda la senal disponible.
+- Impacto: ROC-AUC +0.036–0.055 y PR-AUC +0.057–0.086 vs el `recommended`
+  original, en todos los modelos. **El mayor lift de todo el proyecto.**
+
+**Threshold tuning (f1 OOF)**
+- Que es: por cada modelo, elegir el umbral de decision que maximiza F1
+  sobre las predicciones out-of-fold (OOF) del CV, en vez de usar 0.5.
+  Flag `--threshold-metric {f1,youden,cost}`.
+- Por que ayuda: los modelos conservadores (LinearSVC, XGBoost) operan a
+  0.5 con recall muy bajo (0.38, 0.44) porque su umbral por defecto
+  favorece la specificity. Elegir el umbral sobre OOF (no sobre test, sin
+  leakage) mueve el punto de operacion hacia donde el modelo tiene mejor
+  F1. ROC-AUC/PR-AUC/Brier no cambian (usan probabilidades, no el corte),
+  asi que no es cheating.
+- Impacto: F1 0.49–0.58 → 0.58–0.60; recall 0.38–0.75 → 0.64–0.65.
+  **Tradeoff**: precision baja de ~0.69 a ~0.53 y specificity de ~0.95 a
+  ~0.85 en los modelos conservadores. Es el costo esperado de mover el
+  umbral, no un bug.
+
+### Descartadas (probadas, sin mejora razonable)
+
+**HP tuning (GridSearchCV)**
+- Que es: busqueda en grilla por modelo (class_weight multiplier +
+  complejidad/regularizacion), scoring PR-AUC, sobre un subsample con CV
+  interno. Escribia `hp_best.json` que `main()` leia para hacer
+  `set_params`.
+- Por que no ayuda: el threshold tuning ya optimiza el punto de operacion;
+  el multiplicador de class_weight que el grid elige (1:3, 1:5) desplaza
+  el umbral de decision, no el ranking — y el ranking es lo unico que
+  mueve ROC-AUC/PR-AUC. Los defaults ya estaban cerca del optimo.
+- Resultado: marginal (f1 ~+0.001–0.01, ROC-AUC/PR-AUC planos). Borrado.
+
+**Interacciones degree-2 (modelos lineales)**
+- Que es: encoder alternativo con `PolynomialFeatures(degree=2,
+  interaction_only=True)` sobre el bloque numerico, aplicado solo a
+  LinearSVC y LogReg. Darles las interacciones numerico×numerico que los
+  arboles capturan nativamente.
+- Por que no ayuda: la hipotesis era que el techo bajo de los lineales
+  venia de falta de no-linealidad. No es asi: la senal es ya cercana a
+  lineal, o los 78 terminos extra sobreajustan (fold 3 empeora). El techo
+  de los lineales esta fijado por otro lado (capacidad lineal sobre estas
+  30 features), no por interacciones faltantes.
+- Resultado: nulo (ROC-AUC plano, f1 sin mover). Revertido.
+
+**Ensemble (StackingClassifier)**
+- Que es: sexto modelo, stacking de las 5 bases con un meta-learner
+  LogisticRegression y CV interno (cv=3) para generar predicciones OOF de
+  las bases como features del meta-learner, sin leakage.
+- Por que no ayuda (en full data): en subsamples de 30k el Ensemble ganaba
+  ~+0.01 ROC-AUC sobre la mejor base — las bases no habian llegado al
+  techo. En 455k las bases (XGBoost/LightGBM) ya llegan al mismo techo
+  (0.843), asi que el stacking no suma. Ademas es un modelo aparte: no
+  levanta las metricas peores (LinearSVC/XGBoost siguen bajos), solo
+  agrega una fila mas que empata a las mejores. Costo: ~3-4x el fit por
+  fold.
+- Resultado: empata a XGBoost/LightGBM (ROC-AUC 0.843, F1@thr 0.597) sin
+  superarlos y no afecta las metricas peores. Borrado.
+
 ## Estructura del repo
 
 ```
