@@ -211,9 +211,10 @@ Salidas en `metadata/model_results/`:
 
 ## Resultados
 
-El registro de cambios y el reporte final (full data, 5-fold CV) viven en
-`reports/changes_and_results.md`: metricas por modelo, veredicto por
-cambio (mantenidos y descartados) y configuracion recomendada.
+El reporte final (full data, 5-fold CV, metricas por modelo y configuracion
+recomendada) vive en `reports/final_results.md`. El registro completo de
+cambios — que se probo, que se mantuvo y que se descarto — vive en
+`reports/changes_and_results.md`.
 
 Metrica principal: **ROC-AUC**, complementada con **PR-AUC** y **Brier**.
 
@@ -232,7 +233,8 @@ metadata/
     brfss_2024_columns.md
   model_results/                      # salidas del pipeline (folds, summary, CM)
 reports/
-  changes_and_results.md              # registro de cambios + reporte final (5-fold)
+  final_results.md                   # reporte final (5-fold full data, metricas + config)
+  changes_and_results.md              # registro de cambios (kept/discarded audit trail)
 legacy/                               # archivos de versiones anteriores (historico)
 ```
 
