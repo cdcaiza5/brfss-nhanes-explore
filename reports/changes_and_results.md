@@ -203,6 +203,10 @@ original real, conservadora (favorece al original).
 
 ### Veredicto por cambio
 
+> Nota: el Ensemble fue descartado despues (ver el reporte final y el
+> resumen al inicio de este archivo). La tabla abajo refleja el veredicto
+> previo en 30k, antes de la corrida en full data.
+
 | cambio | impacto metrico | veredicto |
 |---|---|---|
 | **Single `default` preset (universo)** | ROC-AUC +0.036–0.055, PR-AUC +0.057–0.086, Brier −0.01 a −0.03 **en todos los modelos**. La mayor parte del lift viene de aca (mejores features). | **Vale la pena.** Es el cambio de mayor impacto y simplifica el pipeline (un solo preset en vez de dos). |

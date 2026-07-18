@@ -192,10 +192,12 @@ python brfss_dataset_model_ADDEPEV3.py --balancing undersampling-nearmiss --subs
 - **Mejor combinacion por defecto**: `ADDEPEV3` + `default` +
   `--balancing class_weight` (`_RACE` ya incluida por defecto). Reproducir con:
   ```bash
-  python brfss_dataset_model_ADDEPEV3.py --subsample 100000 --cv 5
+  python brfss_dataset_model_ADDEPEV3.py --cv 5
   ```
-  Espera ~2 min en CPU moderna. RandomForest lidera con ROC-AUC ~0.83 y
-  F1 ~0.59 en el set `default`.
+  Full data 5-fold: ~32 min en CPU moderna. XGBoost y LightGBM lideran
+  ROC-AUC (~0.843) y PR-AUC (0.635); XGBoost tiene el mejor Brier (0.116).
+  LightGBM lidera F1 al umbral optimo (~0.597). Ver `reports/final_results.md`
+  para la tabla completa.
 
 - `ADDEPEV3` es un target dificil por base rate 21% y senal historica:
   recall ~0.40 con todos los modelos; ROC-AUC ~0.83 con el set `default`
@@ -357,10 +359,10 @@ pip install -r requirements.txt
 
 ## Limitaciones
 
-- Subsample de 100 000 para benchmarks. Full data con `--balancing
-  class_weight` (default) corre en ~30 min; con `smote` o
-  `undersampling-nearmiss` seria ~5-7x mas lento por el KNN del
-  resampleo.
+- Full data (455k filas) con `--balancing class_weight` (default) y 5-fold
+  CV corre en ~32 min; con `smote` o `undersampling-nearmiss` seria ~5-7x
+  mas lento por el KNN del resampleo. Para iteracion rapida, usar
+  `--subsample` (ej. `30000 --cv 2`, ~30 s).
 - Sin tuning de hiperparametros (se probo y se descarto; ver
   `reports/changes_and_results.md`). El lift medido en los benchmarks
   viene del feature set y la estrategia de balanceo, no del tuning.
@@ -371,5 +373,8 @@ pip install -r requirements.txt
   Para screening, el recall es la metrica relevante y sigue siendo bajo.
 - `_RACE` se incluye por defecto como mean-encoded (no one-hot) para
   preservar el sample size.
-- Threshold fijo en 0.5. Para `ADDEPEV3` ajustarlo puede mejorar recall
-  a costa de precision, pero el limite real es la senal insuficiente.
+- El umbral por defecto es F1-optimo por modelo sobre OOF
+  (`--threshold-metric f1`), no 0.5. Operar en 0.5 daria recall mas bajo
+  en los modelos conservadores (LinearSVC ~0.38, XGBoost ~0.44); el
+  tuning lo sube a ~0.64 a costa de precision. El limite real sigue
+  siendo la senal insuficiente.
