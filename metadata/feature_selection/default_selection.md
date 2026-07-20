@@ -1,4 +1,4 @@
-# Seleccion del preset `default` — 2026-07-18
+# Seleccion del preset `default` — 2026-07-20
 
 Seleccion de las 30 mejores variables para `ADDEPEV3` sobre el universo
 completo de columnas (menos ID/geo/peso/estructurales y el target).
