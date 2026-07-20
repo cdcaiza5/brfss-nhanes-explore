@@ -12,3 +12,6 @@ data/
 
 # OS
 .DS_Store
+
+# Paper (LaTeX source + PDF, kept out of the repo)
+paper/
