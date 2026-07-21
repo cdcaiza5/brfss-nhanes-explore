@@ -187,7 +187,7 @@ def main():
 
     # --- Escribir reporte markdown ---
     write_report(
-        args.out, rf_top, mi_top, perm, overlap, canonical,
+        args.out, rf_imp, mi_imp, perm, overlap, canonical,
         rf_train_auc=roc_auc_score(y_tr, rf.predict_proba(Xf)[:, 1]),
         rf_test_auc=roc_auc_score(y_te, rf.predict_proba(Xf_test)[:, 1]),
         rf30_test_auc=roc_auc_score(y_te, rf30.predict_proba(Xf_test_top)[:, 1]),
@@ -213,14 +213,14 @@ def write_report(path, rf_top, mi_top, perm, overlap, canonical,
         f"- RF sobre el top-30 canonico (test): **{rf30_test_auc:.4f}**",
         f"  (delta vs universo: {rf30_test_auc - rf_test_auc:+.4f})",
         "",
-        "## TOP 30 — RandomForest (canonico)",
+        "## RandomForest — ranking completo (canonico: top-30)",
         "",
         "| rank | variable | importancia RF |",
         "|---|---|---|",
     ]
     for i, (nm, v) in enumerate(rf_top.items(), 1):
         lines.append(f"| {i} | `{nm}` | {v:.5f} |")
-    lines += ["", "## TOP 30 — Mutual Information (contraste)", "",
+    lines += ["", "## Mutual Information — ranking completo (contraste; canonico: top-30)", "",
               "| rank | variable | MI |", "|---|---|---|"]
     for i, (nm, v) in enumerate(mi_top.items(), 1):
         lines.append(f"| {i} | `{nm}` | {v:.5f} |")

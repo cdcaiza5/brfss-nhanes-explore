@@ -13,5 +13,32 @@ data/
 # OS
 .DS_Store
 
-# Paper (LaTeX source + PDF, kept out of the repo)
-paper/
+# LaTeX build byproducts (paper/ source + PDF are tracked; build artifacts are not)
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.bbl.bak
+*.blg
+*.run.xml
+*.nav
+*.snm
+*.vrb
+*.idx
+*.ilg
+*.ind
+*.glo
+*.glg
+*.gls
+*.glx
+*.ist
+*.acn
+*.acr
+*.alg
+*.glstex
