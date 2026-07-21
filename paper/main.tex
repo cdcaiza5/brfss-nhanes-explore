@@ -83,7 +83,7 @@ The remainder of this article is organized as follows: Section II details the me
 This article develops a predictive and comparative study based on a quantitative and descriptive approach. The primary goal of the research is to estimate the risk of depression in adults through a comparative evaluation of machine learning algorithms, identifying which socio-demographic and behavioral biomarkers exert the greatest predictive influence. A non-experimental, cross-sectional design is proposed, analyzing retrospective epidemiological databases to construct a clinical classification model \cite{sokolov_decoding_2024} %[cite: 3].
 
 \subsection{Development Methodology}
-For the execution of the project, the CRISP-DM (Cross-Industry Standard Process for Data Mining) methodology \cite{chapman2000crisp} %[cite: 3] 
+For the execution of the study, the CRISP-DM (Cross-Industry Standard Process for Data Mining) methodology \cite{chapman2000crisp} %[cite: 3] 
 was adopted. This framework was chosen due to its cyclical and industry-standard structure, which is ideal for the systematic development of predictive models in the healthcare domain. The analytical tools were based on the Python programming language, utilizing specialized libraries such as Pandas \cite{mckinney2010pandas} %[cite: 3] 
 for tabular manipulation via \texttt{pyreadstat} %[cite: 1], 
 and Scikit-learn \cite{scikit-learn} %[cite: 3] 
@@ -104,12 +104,38 @@ The definitive clinical target variable for this predictive model is \texttt{ADD
 During the data preparation pipeline, this categorical variable is binarized, mapping positive diagnoses to 1 and negative diagnoses to 0, while non-responses are discarded to maintain the integrity of the supervised learning process %[cite: 1]. 
 While other depression-related variables exist in the dataset (e.g., \texttt{\_MENT14D}), \texttt{ADDEPEV3} was selected as the primary target due to its direct and definitive clinical diagnostic value %[cite: 1, 2].
 
-Feature selection was performed by training a Random Forest classifier on the $100{,}000$-row subsample over the full $301$-column universe (excluding the $11$ variables listed in the supplementary material: \texttt{ADDEPEV3}, \texttt{\_STATE}, \texttt{SEQNO}, \texttt{\_PSU}, \texttt{\_STRWT}, \texttt{\_WT2RAKE}, \texttt{\_LLCPWT}, \texttt{\_LLCPWT2}, \texttt{\_CLLCPWT}, \texttt{IDATE}, \texttt{WEIGHT2}) and ranking variables by Gini importance. The canonical set is the top-$30$ by RF importance. Two documented substitutions were applied: \texttt{\_MENT14D} (rank 2 in RF) was excluded because it is a near-duplicate of the target \texttt{ADDEPEV3}, and \texttt{\_STSTR} (rank 30) was excluded because it is a sampling stratum rather than a predictor. \texttt{\_PACKYRS} (RF rank 36) and \texttt{MEDCOST1} (RF rank 47) were substituted in to replace them. The literal next 2 RF ranks ($31$ and $32$, importances $0.00605$ and $0.00572$) were not used: rank 31 is the mean-encoded form of \texttt{\_RACE} which is already represented outside the 30-count, and rank 32 (\texttt{\_CASTHM1}) is a redundant legacy variant of \texttt{\_ASTHMS1} at rank 17. The $100{,}000$-row subsample was used for the selector alone (Random Forest fitting, mutual information, and permutation importance are not tractable on $455{,}006$ rows for the full universe); the chosen predictor set was then trained and evaluated on the full $455{,}006$-row dataset for the $5$-fold cross-validation. The final preset \texttt{default} therefore contains $30$ raw predictors (8 numeric, 4 ordinal, 18 categorical), with \texttt{\_RACE} mean-encoded separately; the model therefore receives $31$ input features per row. The full RF ranking is provided in Appendix~\ref{app:rf} %[cite: 1].
+Feature selection was performed by training a Random Forest classifier on a $100{,}000$-row subsample over the full $301$-column universe, ranking variables by Gini importance. Eleven variables were excluded from the universe (Table~\ref{tab:excluded}); the canonical predictor set is the top-$30$ by RF importance, with two documented substitutions: \texttt{\_MENT14D} (RF rank $2$) was excluded because it is a near-duplicate of the target \texttt{ADDEPEV3}, and \texttt{\_STSTR} (RF rank $30$) was excluded because it is a sampling stratum rather than a predictor. \texttt{\_PACKYRS} (RF rank $36$) and \texttt{MEDCOST1} (RF rank $47$) were substituted in to replace them. The literal next two RF ranks ($31$ and $32$, importances $0.00605$ and $0.00572$) were not used: rank $31$ is the mean-encoded form of \texttt{\_RACE}, which is represented separately, and rank $32$ (\texttt{\_CASTHM1}) is a redundant legacy variant of \texttt{\_ASTHMS1} at rank $17$. The $100{,}000$-row subsample was used for the feature-selection step alone (Random Forest fitting, mutual information, and permutation importance are not tractable on $455{,}006$ rows for the full universe); the chosen predictor set was then trained and evaluated on the full $455{,}006$-row dataset in the $5$-fold cross-validation. The chosen set contains $30$ raw predictors ($8$ numeric, $4$ ordinal, $18$ categorical), with \texttt{\_RACE} mean-encoded separately; the model therefore receives $31$ input features per row. The relevant RF ranking is included in Appendix~\ref{app:rf} %[cite: 1].
+
+\begin{table}[!htbp]
+\caption{Variables excluded from the feature-selection universe}
+\label{tab:excluded}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{|l|l|p{4.5cm}|}
+\hline
+\textbf{Variable} & \textbf{Category} & \textbf{Reason for exclusion} \\
+\hline
+ADDEPEV3   & target        & Lifetime depression diagnosis; the prediction target. \\
+\_STATE    & geography     & U.S. state of residence. \\
+SEQNO      & identifier    & Respondent sequence number. \\
+\_PSU      & identifier    & Primary sampling unit. \\
+\_STRWT    & design weight & Design stratum weight. \\
+\_WT2RAKE  & design weight & Final raking weight. \\
+\_LLCPWT   & design weight & Landline-cellphone design weight. \\
+\_LLCPWT2  & design weight & Design weight (LLCP 2024). \\
+\_CLLCPWT  & design weight & Combined landline/cellphone weight. \\
+IDATE      & structural    & Interview date. \\
+WEIGHT2    & redundant     & Reported weight in pounds; redundant with WTKG3. \\
+\hline
+\end{tabular}
+\end{table}
 
 As detailed in Table \ref{tab_rf_importance}, the chosen set spans cognitive and psychosocial states (\texttt{DECIDE}, \texttt{DIFFALON}, \texttt{SDLONELY}, \texttt{LSATISFY}), self-reported mental and physical health days (\texttt{MENTHLTH}, \texttt{POORHLTH}, \texttt{PHYSHLTH}, \texttt{\_PHYS14D}, \texttt{\_RFHLTH}, \texttt{GENHLTH}), demographic and anthropometric variables (\texttt{\_AGE80}, \texttt{\_AGEG5YR}, \texttt{\_SEX}, \texttt{SEXVAR}, \texttt{CELLSEX3}, \texttt{\_BMI5}, \texttt{HEIGHT3}, \texttt{WTKG3}), socioeconomic and behavioural indicators (\texttt{EMPLOY1}, \texttt{MEDCOST1}, \texttt{ECIGNOW3}, \texttt{\_PACKYRS}), and chronic-condition and screening history (\texttt{ASTHMA3}, \texttt{\_LTASTH1}, \texttt{\_ASTHMS1}, \texttt{HAVARTH4}, \texttt{\_DRDXAR2}, \texttt{HIVTST7}, \texttt{\_AIDTST4}, \texttt{HIVTSTD3}).
 
 \begin{table}[htbp]
-\caption{Top-30 Predictors of the Preset \texttt{default} (RF-ranked)}
+\caption{Top-30 Predictors of the Chosen Set (RF-ranked)}
 \begin{center}
 \scriptsize
 \setlength{\tabcolsep}{3pt}
@@ -167,7 +193,7 @@ Additionally, values of $88$ in \texttt{PHYSHLTH}, \texttt{MENTHLTH}, and \textt
 Categorical variables were processed using smoothed mean encoding and One-Hot Encoding, while numerical variables were normalized using a Standard Scaler %[cite: 1]. 
 The single \texttt{\_RACE} column is mean-encoded rather than one-hot-encoded: a single regularised numeric effect is easier to interpret in isolation and avoids one-hot encoding amplifying racial-disparity patterns in downstream predictions, while the smoothing prior ($\alpha=10$) prevents overfitting on small groups %[cite: 1]. 
 Of the seven race-ethnicity variables available in BRFSS 2024 (\texttt{\_RACE}, \texttt{\_RACEGR3}, \texttt{\_RACEG21}, \texttt{\_RACEPRV}, \texttt{\_IMPRACE}, \texttt{\_MRACE1}, \texttt{\_CRACE1}), \texttt{\_RACE} was selected as the canonical CDC reporting standard; the other variables are alternative cardinalities or non-Hispanic-specific cuts of the same construct and would not change the model materially %[cite: 1]. 
-Race was included as a feature for two reasons. Empirically, the encoded column has RF rank $31$ with Gini importance $0.00605$, placing it above all variables below the top-$30$ cutoff; the model is marginally better with it than without. Clinically, depression prevalence is known to vary systematically by race in US epidemiological data due to a combination of social determinants (discrimination, healthcare access) and measurement effects (underdiagnosis in some groups, overdiagnosis in others); the encoded form lets the model learn this baseline. We note that the inclusion of race in a depression-prediction model has known fairness implications and that the fairness properties of the model are not separately validated in this study; the choice is documented here so that downstream users can make an informed decision about deployment %[cite: 1]. 
+Race was included as a feature for two reasons. Empirically, the encoded column has RF rank $31$ with Gini importance $0.00605$, placing it above all variables below the top-$30$ cutoff; the model is marginally better with it than without. Clinically, depression prevalence is known to vary systematically by race in US epidemiological data due to a combination of social determinants (discrimination, healthcare access) and measurement effects (underdiagnosis in some groups, overdiagnosis in others); the encoded form lets the model learn this baseline. We note that the inclusion of race in a depression-prediction model has known fairness implications and that the fairness properties of the model are not separately validated in this study; the trade-off is left to the deploying institution's judgement %[cite: 1]. 
 Finally, missing values were imputed using the median for numeric/ordinal data and the mode for categorical data %[cite: 1].
 
 \subsection{Dataset Partitioning and Balancing Justification}
@@ -196,7 +222,7 @@ Instead of relying solely on baseline accuracy, the models were evaluated using 
     \item \textbf{Brier Score \& Confusion Matrix:} The Brier score measures the exactness of the probabilistic outputs, while the accumulated Confusion Matrix provides a direct visualization of true positive, true negative, false positive, and false negative predictions across the $5$ folds. %[cite: 1]
 \end{itemize}
 
-In addition to the standard probability metrics, the per-model decision threshold was tuned out-of-fold by maximizing F1 (default); the \texttt{youden} (Youden's $J$) and \texttt{cost} (cost-sensitive with user-defined cost ratio) options are available for screening and cost-sensitive applications. The reported \texttt{*@thr} rows show metrics at the chosen threshold, and \texttt{threshold} reports the threshold itself. In this paper we report the F1-tuned threshold (5-fold mean). %[cite: 1]
+In addition to the standard probability metrics, the per-model decision threshold was tuned out-of-fold by maximizing F1; alternatives such as Youden's $J$ statistic and a cost-sensitive criterion (with a user-defined cost ratio) are also applicable for screening and cost-sensitive applications. The reported \texttt{*@thr} columns show metrics at the chosen threshold, and the \texttt{threshold} column reports the threshold itself. In this study we report the F1-tuned threshold (5-fold mean). %[cite: 1]
 
 \subsection{Implementation Environment}
 The system was implemented using a high-performance computational environment executed via Python scripts. Mathematical processing relied on NumPy \cite{harris2020array} %[cite: 3] 
@@ -207,7 +233,7 @@ ecosystem.
 
 \section{Results}
 
-The findings of the predictive modeling experiment are presented based on the evaluation of five machine learning architectures over a $5$-fold stratified cross-validation process on the full $455{,}006$-row dataset. The algorithms were evaluated on their ability to detect the \texttt{ADDEPEV3} target using the $30$ socio-behavioral biomarkers of the preset \texttt{default}. Thresholds are tuned per model out-of-fold to maximize F1; the \texttt{*@thr} columns report metrics at the chosen threshold, while the unsubscripted accuracy is reported at the $0.5$ default threshold.
+The findings of the predictive modeling experiment are presented based on the evaluation of five machine learning architectures over a $5$-fold stratified cross-validation process on the full $455{,}006$-row dataset. The algorithms were evaluated on their ability to detect the \texttt{ADDEPEV3} target using the $30$ socio-behavioral biomarkers of the chosen predictor set. Thresholds are tuned per model out-of-fold to maximize F1; the \texttt{*@thr} columns report metrics at the chosen threshold, while the unsubscripted accuracy is reported at the $0.5$ default threshold.
 
 Table \ref{tab:model_results} summarizes the performance metrics for each model. XGBoost achieves the highest unsubscripted accuracy ($0.840$) and the lowest Brier score ($0.116$), indicating the best-calibrated probability estimates. XGBoost and LightGBM are tied for the highest ROC-AUC ($0.843$) and PR-AUC ($0.635$). Under the F1-tuned threshold, XGBoost and LightGBM also tie for the highest F1 ($0.597$): LightGBM is marginally ahead in recall ($0.652$ vs $0.644$) and XGBoost is marginally ahead in precision ($0.556$ vs $0.552$). 
 
@@ -300,7 +326,7 @@ The developed predictive framework offers direct practical applications for heal
 \appendix
 \section{Feature selection evidence}
 
-Table~\ref{app:rf} lists the Random Forest Gini-importance top-30 that produced the \texttt{default} preset, plus the two substituted-in variables from later RF ranks. Rows marked with a single asterisk are excluded from the preset; rows marked with a double asterisk are substituted in.
+Table~\ref{app:rf} lists the Random Forest Gini-importance top-30 of the chosen predictor set, plus the two substituted-in variables from later RF ranks. Rows marked with a single asterisk are excluded from the chosen set; rows marked with a double asterisk are substituted in.
 
 \begin{table}[H]
 \caption{Random Forest Top-30 by Gini Importance (canonical)\,$^{\mathrm{a}}$}
@@ -346,7 +372,7 @@ Table~\ref{app:rf} lists the Random Forest Gini-importance top-30 that produced 
 36 & \_PACKYRS$^{**}$  & 0.00502 \\
 47 & MEDCOST1$^{**}$   & 0.00380 \\
 \hline
-\multicolumn{3}{|p{8cm}|}{\footnotesize $^{\mathrm{a}}$\textit{Note.} $^{*}$Excluded from the preset by documented substitution: \texttt{\_MENT14D} (rank 2) as a near-duplicate of the target, \texttt{\_STSTR} (rank 30) as a sampling stratum. $^{**}$Substituted in from later RF ranks to replace the excluded rows: \texttt{\_PACKYRS} (rank 36), \texttt{MEDCOST1} (rank 47). The full ranking over all candidate variables is included in the supplementary material.} \\
+\multicolumn{3}{|p{8cm}|}{\footnotesize $^{\mathrm{a}}$\textit{Note.} $^{*}$Excluded from the chosen set by documented substitution: \texttt{\_MENT14D} (rank 2) as a near-duplicate of the target, \texttt{\_STSTR} (rank 30) as a sampling stratum. $^{**}$Substituted in from later RF ranks to replace the excluded rows: \texttt{\_PACKYRS} (rank 36), \texttt{MEDCOST1} (rank 47).} \\
 \hline
 \end{tabular}
 \end{table}
